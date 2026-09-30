@@ -44,7 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CORE_REPO = "Aliothmoon/MaaAgentCoreAndroid"
-CORE_TAG = "3.13.15-maafw5.13.0"
+# BAASMAM: 对齐到 setup_maa_framework.py 铺入的 MaaFramework 原生库版本。
+# 内核里的 maa Python 绑定与 libMaaFramework.so 必须同版本，否则 ABI 错配会崩。
+# 改这里时必须同步改 docs/UPSTREAM-VERSIONS.md 并重跑 setup_maa_framework.py。
+CORE_TAG = "3.13.15-maafw5.14.2"
 CORE_PY = "3.13.15"
 CORE_URL = "https://github.com/{repo}/releases/download/{tag}/{asset}"
 CORE_MANIFEST = "agent-core.json"

@@ -68,6 +68,13 @@ ZIP_VERSION_RE = re.compile(r"-android-(?:aarch64|x86_64)-(v[0-9A-Za-z.\-+]+)\.z
 # 外壳支持的最低 MaaFramework 版本；bridge 无条件读 TouchArgs.contact（#1447，v5.13.0-beta.3 起），
 # 更旧的产物不会报错，只会让多指静默退化成单指
 MIN_VERSION = (5, 13, 0)
+
+# BAASMAM: 显式锁定版本，避免默认取 latest 造成隐式漂移。
+# 必须与 build_agent_bundle.py 的 CORE_TAG 里的 maafw 版本一致
+# （内核的 maa Python 绑定与 libMaaFramework.so 必须同版本）。
+# 设为 None 则回退到上游行为（取 latest）。
+PINNED_VERSION = "v5.14.2"
+
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.\-]+)?(\+[0-9A-Za-z.\-]+)?$")
 
 
@@ -270,7 +277,9 @@ def main():
     parser = argparse.ArgumentParser(description="下载并铺开 MaaFramework 的 Android .so")
     parser.add_argument("--repo", "-r", default=DEFAULT_GITHUB_REPO,
                         help=f"GitHub 仓库（owner/repo，默认 {DEFAULT_GITHUB_REPO}）")
-    parser.add_argument("--tag", "-t", help="指定 release tag，默认取 latest")
+    parser.add_argument("--tag", "-t", default=PINNED_VERSION,
+                        help=f"指定 release tag；BAASMAM 锁定为 {PINNED_VERSION}，"
+                             f"显式传 latest 可回退到上游行为")
     parser.add_argument("--skip-download", "-s", action="store_true", help="跳过下载，只用缓存")
     parser.add_argument("--abi", choices=["arm64-v8a", "x86_64", "all"], default="all",
                         help="只处理指定 ABI，默认全部")
