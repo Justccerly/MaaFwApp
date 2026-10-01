@@ -32,28 +32,54 @@ private const val GIT_WORKING_DIR_KEY = "maafw.gitWorkingDir"
 /**
  * versionCode counts commits in the selected version repo; the build fails without a git checkout
  *
- * ⚠️ BAASMAM: **versionCode 用本仓库（fork）的提交数，不用最外层 superproject。**
+ * ⚠️ BAASMAM: **versionCode = fork 提交数 + 主仓库提交数**，两者都计入。
  *
- * 上游的 `versionGitWorkingDir()` 会向上走到最外层仓库 —— 那是为「本仓库作为
- * 别人的 submodule 发布」设计的。但在 BAASMAM 里，我们**只改 fork 和 agent**，
- * 主仓库提交数增长很慢，导致：
+ * ## 为什么不能用上游的实现
  *
- *   - 出了 5 个功能不同的 APK，versionCode 只从 15 变到 21
- *   - **同一 versionCode 可能对应多个不同的 APK**，Android 的安装/更新
- *     判断因此不可靠（覆盖安装可能被当成「版本相同」而静默跳过）
- *   - 真机排查时无法从 `Version : xxx (NN)` 反推装的是哪个包
+ * 上游 `versionGitWorkingDir()` 会向上走到**最外层 superproject**，只取主仓库
+ * 的提交数。但在 BAASMAM 里我们**同时改两处**：
  *
- * 所以改为**始终用本仓库的提交数**。fork 提交数增长快，每次出包必然递增。
+ *   - `agent/`（主仓库）—— 适配层，改动最频繁
+ *   - `upstream/MaaFwApp`（fork）—— Kotlin 侧改动
+ *
+ * 只取一边都会出问题，两条路都实测踩过：
+ *
+ *   | 取谁的提交数 | 后果 |
+ *   |---|---|
+ *   | 只取主仓库 | 出 5 个功能不同的 APK，versionCode 只从 15 变到 21；<br>**同一 versionCode 对应多个不同 APK** → 覆盖安装被系统静默跳过 |
+ *   | 只取 fork   | 改 `agent/` 时 fork 不动 → **versionCode 卡住不变**（同样是多包同号） |
+ *
+ * ## 现在的做法
+ *
+ * `fork 提交数 * 10000 + 主仓库提交数`，两边任一变化都会让 versionCode 递增。
+ *
+ * 乘 10000 是留足空间：主仓库提交数远小于 10000，不会进位串号；
+ * 且 fork 每 +1，versionCode 至少 +10000，**严格单调递增**，
+ * 不会出现「fork 加了提交但 versionCode 反而变小」。
  *
  * 注意 `gitVersionName()` 仍用 superproject —— 那是**显示用**的版本名
  * （让用户看到项目整体的版本），且它有 tag 兜底，不影响安装判断。
  */
 internal fun Project.gitVersionCode(): Int {
-    val ownDir = rootProject.projectDir
-    return providers.exec {
-        workingDir(ownDir)
+    fun countCommits(dir: File): Int = providers.exec {
+        workingDir(dir)
         commandLine("git", "rev-list", "--count", "HEAD")
     }.standardOutput.asText.get().trim().toInt()
+
+    val forkCount = countCommits(rootProject.projectDir)
+
+    // 主仓库：本仓库作为 submodule 时的 superproject。
+    // 拿不到（比如单独 clone 了 fork）就按 0 算，此时 fork 提交数独自决定版本号。
+    val mainCount = runCatching {
+        val superproject = providers.exec {
+            workingDir(rootProject.projectDir)
+            commandLine("git", "rev-parse", "--show-superproject-working-tree")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.get().trim()
+        if (superproject.isEmpty()) 0 else countCommits(File(superproject))
+    }.getOrDefault(0)
+
+    return forkCount * 10_000 + mainCount
 }
 
 /**
