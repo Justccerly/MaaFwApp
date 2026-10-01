@@ -370,11 +370,53 @@ class RemoteServiceImpl : RemoteService.Stub() {
      * 它自己按 flag 文件判要不要动手，没改过时是空操作
      */
     private fun cleanup() {
+        // BAASMAM: 先关目标应用，再拆虚拟屏。
+        //
+        // 为什么必须显式关：
+        //   VirtualDisplayManager 建屏时带了 VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL
+        //   （VD_DESTROY_CONTENT = true），**理论上** release() 会连带清掉屏上的应用。
+        //   但实测在 OnePlus / Android 16 上不生效 —— 应用退出后游戏仍在后台跑，
+        //   用户戴着耳机还能听到游戏音乐（耗电 + 扰民）。
+        //   AppWatchdog.targetPackage 的注释本来就写着「收尾要关它」，但收尾一直没关。
+        //
+        // 放在 cleanup 而不是 destroy，是因为 cleanup 同时被两条退出路径覆盖：
+        //   1. destroy()          —— 正常退出
+        //   2. remote-shutdown-hook —— 特权进程被 SIGTERM（app 进程消失后自杀）
+        // 必须在 stopVirtualDisplay 之前做：屏还在时才拿得到目标包名。
+        step("stop target app") { stopTargetAppQuietly() }
+
         step("game fps") { GameFpsMonitor.stop() }
         step("screen size") { ScreenManager.destroy() }
         step("power") { PowerController.destroy() }
         step("primary display") { PrimaryDisplayManager.stop() }
         step("virtual display") { VirtualDisplayManager.stop() }
+    }
+
+    /**
+     * 关掉虚拟屏上的目标应用。
+     *
+     * 目标包名来自 [AppWatchdog]（运行期从虚拟屏顶层包名反推），
+     * 拿不到就跳过 —— 不能瞎猜包名去 force-stop。
+     *
+     * 用 forceStopPackage 而不是 stopApp：前者是真正的进程级停止，
+     * 后者可能只是 finish 掉 Activity 而进程仍活着（音频仍在播）。
+     */
+    private fun stopTargetAppQuietly() {
+        val target = AppWatchdog.targetPackage
+        if (target.isNullOrBlank()) {
+            Ln.i("$TAG: cleanup skipped stopping target app, watchdog never acquired one")
+            return
+        }
+        runCatching {
+            val stopped = ServiceManager.getActivityManager().forceStopPackage(target)
+            if (stopped) {
+                Ln.i("$TAG: cleanup force-stopped $target")
+            } else {
+                Ln.w("$TAG: cleanup force-stop $target returned false")
+            }
+        }.onFailure {
+            Ln.w("$TAG: cleanup force-stop $target failed: ${it.message}")
+        }
     }
 
     private inline fun step(name: String, action: () -> Unit) {
