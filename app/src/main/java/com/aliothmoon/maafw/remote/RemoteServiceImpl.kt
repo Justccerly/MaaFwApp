@@ -18,6 +18,7 @@ import com.aliothmoon.maafw.service.AccessibilityHelperService
 import com.aliothmoon.maafw.remote.internal.PowerController
 import com.aliothmoon.maafw.remote.internal.PrimaryDisplayManager
 import com.aliothmoon.maafw.remote.internal.ScreenManager
+import com.aliothmoon.maafw.remote.internal.StaleFrameGuard
 import com.aliothmoon.maafw.constant.PrivilegedGrant
 import com.aliothmoon.maafw.remote.internal.VirtualDisplayManager
 import com.aliothmoon.maafw.remote.internal.WakeUnlockController
@@ -65,7 +66,7 @@ class RemoteServiceImpl : RemoteService.Stub() {
     override fun destroy() {
         if (!destroyed.compareAndSet(false, true)) return
         Ln.i("$TAG: destroy()")
-        AppWatchdog.stopWatching()
+        stopDisplayWatchers()
         InputControlUtils.setTouchCallback(null)
         TextInputDispatcher.sink = null
         runner.destroy()
@@ -106,15 +107,8 @@ class RemoteServiceImpl : RemoteService.Stub() {
             Ln.i("$TAG: stopTargetApp skipped, watchdog never acquired a target")
             return false
         }
-        return runCatching {
-            ServiceManager.getActivityManager().forceStopPackage(target).also { stopped ->
-                if (stopped) {
-                    Ln.i("$TAG: force-stopped $target")
-                }
-            }
-        }.getOrElse {
-            Ln.w("$TAG: stopTargetApp failed: ${'$'}it")
-            false
+        return ActivityUtils.forceStop(target, VirtualDisplayManager.getDisplayId()).also { stopped ->
+            if (stopped) Ln.i("$TAG: force-stopped $target")
         }
     }
 
@@ -193,7 +187,7 @@ class RemoteServiceImpl : RemoteService.Stub() {
     }
 
     override fun stopVirtualDisplay() {
-        AppWatchdog.stopWatching()
+        stopDisplayWatchers()
         GameFpsMonitor.stop()
         when (virtualDisplayMode.get()) {
             DisplayMode.PRIMARY -> PrimaryDisplayManager.stop()
@@ -289,14 +283,23 @@ class RemoteServiceImpl : RemoteService.Stub() {
 
     override fun startRun(runPlanJson: String?): Boolean {
         if (runPlanJson.isNullOrBlank()) return false
+        StaleFrameGuard.blankIfVacant()
         val started = runner.start(runPlanJson)
-        if (started) AppWatchdog.startWatching()
+        if (started) {
+            AppWatchdog.startWatching()
+            StaleFrameGuard.start(runner::isRunning)
+        }
         return started
     }
 
     override fun stopRun(): Boolean {
-        AppWatchdog.stopWatching()
+        stopDisplayWatchers()
         return runner.stop()
+    }
+
+    private fun stopDisplayWatchers() {
+        AppWatchdog.stopWatching()
+        StaleFrameGuard.stop()
     }
 
     override fun isRunning(): Boolean = runner.isRunning()
@@ -390,6 +393,7 @@ class RemoteServiceImpl : RemoteService.Stub() {
         step("power") { PowerController.destroy() }
         step("primary display") { PrimaryDisplayManager.stop() }
         step("virtual display") { VirtualDisplayManager.stop() }
+        step("preview") { shutdownPreview() }
     }
 
     /**
@@ -424,6 +428,23 @@ class RemoteServiceImpl : RemoteService.Stub() {
     }
 
     /**
+     * 退出前断开预览 Surface：SurfaceView 的缓冲队列认不出 producer 进程死了，不断开的话
+     * 这块 Surface 会一直算在本进程头上，下一个特权进程 `eglCreateWindowSurface` 报 already connected
+     *
+     * 排在最后且限时：渲染线程可能正卡在 swap 上，等不到就走，不能拖住前面那几项和进程退出
+     */
+    private fun shutdownPreview() {
+        if (!NativeBridgeLib.LOADED) return
+        val worker = Thread { NativeBridgeLib.shutdownPreview() }.apply {
+            name = "preview-shutdown"
+            isDaemon = true
+            start()
+        }
+        worker.join(PREVIEW_SHUTDOWN_TIMEOUT_MS)
+        if (worker.isAlive) Ln.w("$TAG: preview shutdown still running after ${PREVIEW_SHUTDOWN_TIMEOUT_MS}ms, leaving it")
+    }
+
+    /**
      * app 进程消失后特权进程必须自杀
      * linkToDeath 是主路径，这里兜住「binder 还没建立就崩了」的窗口
      */
@@ -452,5 +473,6 @@ class RemoteServiceImpl : RemoteService.Stub() {
     private companion object {
         const val TAG = "RemoteService"
         const val HEARTBEAT_INTERVAL_MS = 5_000L
+        const val PREVIEW_SHUTDOWN_TIMEOUT_MS = 1_000L
     }
 }

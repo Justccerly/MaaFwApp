@@ -9,6 +9,7 @@ import com.aliothmoon.maafw.config.withPasswordFieldsMarked
 import com.aliothmoon.maafw.config.withSecretFields
 import com.aliothmoon.maafw.R
 import com.aliothmoon.maafw.domain.ConfiguredTask
+import com.aliothmoon.maafw.domain.Diagnostic
 import com.aliothmoon.maafw.domain.DiagnosticSeverity
 import com.aliothmoon.maafw.domain.OptionValue
 import com.aliothmoon.maafw.domain.duplicateTask
@@ -49,6 +50,7 @@ import com.aliothmoon.maafw.runner.RunLogRecorder
 import com.aliothmoon.maafw.runner.RunnerCommandResult
 import com.aliothmoon.maafw.runner.RunnerPort
 import com.aliothmoon.maafw.runner.RunnerState
+import com.aliothmoon.maafw.runner.focusPlainText
 import com.aliothmoon.maafw.runner.isBusy
 import com.aliothmoon.maafw.runner.ResolutionPreset
 import com.aliothmoon.maafw.theme.ThemeStyle
@@ -177,6 +179,9 @@ class SessionViewModel(
             welcome?.bodies?.takeIf { welcome.fingerprint != config.welcomeFingerprint }.orEmpty()
         }.distinctUntilChanged()
 
+    /** 失效的 resource 选择写回 null 后 Resolver 不再报，这条提示只留在本进程里，重开即丢 */
+    private val staleResourceNotice = MutableStateFlow<Diagnostic?>(null)
+
     val uiState: StateFlow<SessionUiState> = combine(
         projectRepository.state,
         configurationStore.data,
@@ -189,6 +194,14 @@ class SessionViewModel(
         .combine(permissionGateway.watchdogState) { base, wd -> base.copy(watchdogState = wd) }
         .combine(piInstall.state) { base, install -> base.copy(piInstallState = install) }
         .combine(welcomePrompt) { base, welcome -> base.copy(welcomePrompt = welcome) }
+        .combine(staleResourceNotice) { base, notice ->
+            // 写回落定前 Resolver 自己还在报同一条，不去重会闪出两行
+            if (notice == null || base.projectState !is ProjectState.Ready || notice in base.sessionDiagnostics) {
+                base
+            } else {
+                base.copy(sessionDiagnostics = listOf(notice) + base.sessionDiagnostics)
+            }
+        }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.Eagerly,
@@ -200,6 +213,9 @@ class SessionViewModel(
      * 一次滑动能连发几十个触点，混进聚合态会让整棵树按触摸频率重组
      */
     val previewMarkers: StateFlow<List<PreviewTouchMarker>> = previewPort.markers
+
+    /** 预览面按它重建，见 [PreviewPort.surfaceEpoch] */
+    val previewSurfaceEpoch: StateFlow<Int> = previewPort.surfaceEpoch
 
     /** FPS 每秒更新，独立成流避免整棵 UI 树跟着重组 */
     val gameFps: StateFlow<Float?> = gameFpsWatcher.fps
@@ -252,16 +268,25 @@ class SessionViewModel(
         viewModelScope.launch {
             combine(projectRepository.state, configurationStore.data) { p, c -> p to c }
                 .collect { (project, config) ->
-                    if (project is ProjectState.Ready && !config.initialized) {
+                    if (project !is ProjectState.Ready) return@collect
+                    val definition = project.definition
+                    val staleResource = ConfigurationResolver.staleResourceSelection(definition, config)
+                    if (!config.initialized) {
                         configurationStore.update { current ->
                             if (current.initialized) current
-                            else ConfigurationResolver.initialize(project.definition, current)
+                            else ConfigurationResolver.initialize(definition, current)
                         }
-                    } else if (project is ProjectState.Ready &&
-                        config.withPasswordFieldsMarked(project.definition) !== config
-                    ) {
+                    } else if (staleResource != null) {
+                        // PI 更新后 resource 改名或下架：存的名字清成 null（跟随第一个），提示只留本进程
+                        Timber.w("stored resource %s is no longer declared, cleared", config.activeResourceName)
+                        staleResourceNotice.value = staleResource
+                        configurationStore.update { current ->
+                            if (ConfigurationResolver.staleResourceSelection(definition, current) == null) current
+                            else current.copy(activeResourceName = null)
+                        }
+                    } else if (config.withPasswordFieldsMarked(definition) !== config) {
                         // PI 更新后才把某个字段改成 password：旧配置里的明文补上标记，这一次写回就加密了
-                        configurationStore.update { it.withPasswordFieldsMarked(project.definition) }
+                        configurationStore.update { it.withPasswordFieldsMarked(definition) }
                     }
                 }
         }
@@ -278,9 +303,10 @@ class SessionViewModel(
      * 拿不到 VM。三档各收各的，同一条 focus 因此可能同时走三条路，这是协议本来的语义
      */
     private fun dispatchFocus(focus: FocusMessage) {
-        if (FocusChannel.Toast in focus.channels) {
-            emitEffect(SessionEffect.ShowMessage(uiTextFromProject(focus.content)))
-        }
+        if (FocusChannel.Toast !in focus.channels) return
+        // snackbar 是纯文本面；只有一张图的模板剥完记号什么都不剩，不弹空条
+        val text = focusPlainText(focus.content).ifEmpty { return }
+        emitEffect(SessionEffect.ShowMessage(uiTextFromProject(text)))
     }
 
     /** 写入口当场补 password 标记：等加载时的迁移去补的话，这一笔会先以明文落一次盘 */
@@ -511,6 +537,8 @@ class SessionViewModel(
 
             is SessionIntent.SelectResource -> guarded {
                 configurationStore.update { it.copy(activeResourceName = intent.resourceName) }
+                // 用户自己选过了，「已回退到 X」那句不再成立
+                staleResourceNotice.value = null
             }
 
             is SessionIntent.SelectController -> guarded {

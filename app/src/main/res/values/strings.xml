@@ -139,8 +139,7 @@
     <string name="settings_version_of">%1$s 版本</string>
     <string name="settings_framework">MaaFramework</string>
     <string name="settings_telemetry">帮助改进本项目</string>
-    <string name="settings_telemetry_blocked_desc">当前为调试版本，已禁用匿名数据上报</string>
-    <string name="settings_telemetry_desc">匿名发送崩溃与任务统计，帮助发现常见问题</string>
+    <string name="settings_telemetry_desc">匿名发送崩溃与任务统计；任务失败时附带该任务的运行日志与出错截图，帮助发现常见问题</string>
     <string name="settings_project">项目</string>
     <string name="settings_about_welcome">查看欢迎信息</string>
     <string name="settings_about_contact">联系方式</string>
@@ -615,7 +614,7 @@
     <string name="pi_reinstall_title">重新解压资源</string>
     <string name="pi_reinstall_desc">从安装包重新解压项目资源</string>
     <string name="dialog_reinstall_pi_title">重新解压项目资源</string>
-    <string name="dialog_reinstall_pi_message">确定要重新解压项目资源吗？\n\n这将删除设备上已解压的项目资源并重新解压，请勿在此期间退出应用。运行配置与日志不受影响。</string>
+    <string name="dialog_reinstall_pi_message">确定要重新解压项目资源吗？\n\n这将删除设备上已解压的项目资源并重新解压，请勿在此期间退出应用。Agent 写在资源目录下的记录与日志会一并清除，运行配置与应用日志不受影响。</string>
 
     <!-- 前台模式：主屏分辨率与操作面板 -->
     <string name="foreground_resolution_title">屏幕分辨率</string>
